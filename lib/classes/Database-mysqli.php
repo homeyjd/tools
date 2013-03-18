@@ -8,7 +8,7 @@
 class Database
 {
 
-  /**
+	/**
 	 * Array of Singletons.
 	 * @var array
 	 */
@@ -95,6 +95,9 @@ class Database
 	 * Opens a connection using the current configuration variables, if a connection does not already exist.
 	 * 
 	 * Normally, explicitly calling this is not required -- it is automatically called by most query functions that require an active connection.
+	 * 
+	 * @throws DatabaseException if there was a problem connecting
+	 * @return boolean connection success
 	 */
 	public function connect () {
 		if ($this->connected) {
@@ -108,7 +111,7 @@ class Database
 		$this->connected = @$this->handle->real_connect($server, $username, $password, $database, $port, $socket, $flags);
 
 		if (!$this->connected) {
-			throw new Exception('Connection error: '.$this->handle->error, $this->handle->errno);
+			throw new DatabaseException('Connection error: '.$this->handle->error, $this->handle->errno);
 		}
 
 		return $this->connected;
@@ -148,7 +151,7 @@ class Database
 	 * @param string $table Name of the database table
 	 * @param array $values Can be an array of arrays, or a single array, of key-indexed values. 
 	 * @param string $extra Additional SQL to tack to the end. Mosty used for "ON DUPLICATE KEY UPDATE..."
-	 * @throws Exception if $table is empty or the query fails
+	 * @throws DatabaseException if $table is empty or the query fails
 	 * @return NULL|boolean|int NULL if there is a problem with generating the query, false on query failure, or mysqli::$affected_rows on success
 	 */
 	public function insert($table, array $values, $extra = '') {
@@ -157,7 +160,7 @@ class Database
 		}
 
 		if (!$table || !strlen($table)) {
-			throw new Exception('Must specify a table');
+			throw new DatabaseException('Must specify a table');
 		}
 
 		if (empty($values)) {
@@ -216,7 +219,7 @@ class Database
 	 * @param string $table Name of the database table
 	 * @param array $values A single array of key-indexed values. 
 	 * @param string $where SQL to select the data to change. Should NOT start with the text "WHERE ". 
-	 * @throws Exception if any parameter is empty, or the query fails
+	 * @throws DatabaseException if any parameter is empty, or the query fails
 	 * @return NULL|boolean|int NULL if there is a problem with generating the query, false on query failure, or mysqli::$affected_rows on success
 	 */
 	public function update($table, array $values, $where) {
@@ -225,13 +228,13 @@ class Database
 		}
 
 		if (empty($values)) {
-			throw new Exception('$table and $values cannot be empty');
+			throw new DatabaseException('$table and $values cannot be empty');
 		}
 		if (!$table || !strlen($table)) {
-			throw new Exception('Must specify a table');
+			throw new DatabaseException('Must specify a table');
 		}
 		if (empty($where)) {
-			throw new Exception('Must specify a where clause');
+			throw new DatabaseException('Must specify a where clause');
 		}
 
 		$sql = "UPDATE `$table` SET ";
@@ -292,7 +295,7 @@ class Database
 	 * Runs a query against a database. Will automatically open a connection if there is none.
 	 * In the event of a multi-query, this will simply queue up the SQL. You must call multi_query_commit() to send.
 	 * @param string $sql The query
-	 * @throws Exception On any database error
+	 * @throws DatabaseException On any database error
 	 * @return boolean Query success
 	 */
 	public function query ($sql) {
@@ -314,7 +317,7 @@ class Database
 			if ($errno === 2006) {
 				$this->connected = false;
 			}
-			throw new Exception('Query error ('.$sql.' ):   '.$this->handle->error, $errno);
+			throw new DatabaseException('Query error ('.$sql.' ):   '.$this->handle->error, $errno);
 		}
 
 		return $res;
@@ -341,7 +344,7 @@ class Database
 	/**
 	 * Sends all cached queries to the server as one string.
 	 * The cached queries will be implode()'d with a semi-colon -- DO NOT include a semi-colon in any provided queries.
-	 * @throws Exception If any of the queries had a problem.
+	 * @throws DatabaseException If any of the queries had a problem.
 	 * @return NULL nothing
 	 */
 	public function multi_query_commit () {
@@ -368,7 +371,7 @@ class Database
 			$res = $this->handle->use_result();
 			if ($res === false && $this->handle->errno !== 0) {
 				@mysqli_free_result($res);
-				throw new Exception('Query error ('.$sql.' ):   '.$this->handle->error, $this->handle->errno);
+				throw new DatabaseException('Query error ('.$sql.' ):   '.$this->handle->error, $this->handle->errno);
 			}
 			mysqli_free_result($res);
 		} while ($this->handle->next_result());
@@ -498,6 +501,10 @@ class Database
 	}
 
 }//class
+
+class DatabaseException extends Exception {
+	// nothing
+}
 
 /**
  * This is strictly a convenience class that forwards to the default <code>Database</code> instance.
