@@ -3,7 +3,7 @@
  * Custom class to manage database connections.
  * 
  * @author Jesse Decker, me@jessedecker.com
- * @version 0.1 - Jan1,2013
+ * @version 0.2 - Mar1,2013
  */
 class Database
 {
@@ -23,7 +23,7 @@ class Database
 		if (!empty(self::$_instances[$name])) {
 			return self::$_instances[$name];
 		} else {
-			return self::$_instances[$name] = new DB($name);
+			return self::$_instances[$name] = new self($name);
 		}
 	}
 	
@@ -50,7 +50,7 @@ class Database
 	 * @param string $name Named instance to store OR array with config data.
 	 * @return instance The class instance associated
 	 */
-	public function Database ($init = 'default', array $config = array()) {
+	public function __construct ($init = 'default', array $config = array()) {
 		if (is_array($init)) {
 			$config = $init;
 			$init = 'default';
@@ -97,8 +97,9 @@ class Database
 			throw new Exception('Could not connect to database at '.$server);
 		}
 		if (!empty($database)) {
-			$this->select_db($database);
+			return $this->select_db($database);
 		}
+		return $this->connected;
 	}
 	
 	public function disconnect () {
@@ -113,7 +114,11 @@ class Database
 		if (!$this->connected) {
 			$this->connect();
 		}
-		mysql_select_db($name, $this->handle);
+		$res = mysql_select_db($name, $this->handle);
+		if ($res) {
+			$this->config['database'] = $name;
+		}
+		return $res;
 	}
 	
 	public function insert($table, array $values, $extra = '') {
@@ -125,7 +130,8 @@ class Database
 			throw new Exception('Database::insert: params cannot be empty');
 		}
 		
-		if (!is_array($values[0])) {
+		// check if key-array
+		if (empty($valuse[0]) || !is_array($values[0])) {
 			$cols = array_keys($values);
 			$values = array($values);
 		} else {
@@ -211,16 +217,37 @@ class Database
 		return $values;
 	}
 	
+	public function ping () {
+		$res = @mysql_ping($this->handle);
+		if (!$res) {
+			$this->connected = false;
+		}
+		return !!$res;
+	}
+	
 	public function query ($sql) {
 		if (!$this->connected) {
 			$this->connect();
 		}
+		
 		$res = mysql_query($sql, $this->handle);
+		
 		if (!$res) {
-			throw new Exception('Query error ('.$sql.' ):   '.mysql_error($this->handle));
+			$errno = mysql_errno($this->handle);
+			if ($errno === 2006) {
+				$this->connected = false;
+			}
+			throw new Exception('Query error ('.$sql.' ):   '.mysql_error($this->handle), $errno);
 		}
 		
 		return $res;
+	}
+	
+
+	public function multi_query_start () {
+	}
+	
+	public function multi_query_commit () {
 	}
 	
 	public function affected_rows () {
@@ -273,9 +300,42 @@ class Database
 	
 	public function escape ($text) {
 		if (!$this->connected) {
-			$this->connect;
+			$this->connect();
 		}
-		return mysql_escape_string($text);
+		return mysql_real_escape_string($text);
+	}
+	
+	public function each ($sql, $callable, $chunksize = 100, $max = 0) {
+		$sql .= ' LIMIT ';
+		$cur = 0;
+		
+		if ($max > 0 && $chunksize > $max) {
+			$chunksize = $max;
+		}
+		
+		while(true) {
+			if ($max > 0) {
+				if ($cur >= $max) {
+					return; // done
+				} elseif (($cur+$chunksize) > $max) {
+					$chunksize = $max - $cur;
+				}
+			}
+			
+			$data = $this->fetch_assoc($sql . "$cur,$chunksize");
+			
+			if (count($data)) {
+				foreach($data as $d) {
+					$callable($d);
+				}
+			}
+			
+			if (count($data) == $chunksize) {
+				$cur += $chunksize;
+			} else {
+				return;
+			}
+		}
 	}
 	
 }//class
