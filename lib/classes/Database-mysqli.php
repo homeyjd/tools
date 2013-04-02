@@ -49,6 +49,7 @@ class Database
 
 	/**
 	 * Constructor.
+	 * 
 	 * @param string $name Stores this instance for use with <code>instance()</code>, OR can pass an array with config data and <code>$init</code> will equal "default".
 	 * @param array $config Array of configuration parameters. See <code>$this->config</code> for documentation.
 	 * @return instance
@@ -111,6 +112,7 @@ class Database
 		$this->connected = @$this->handle->real_connect($server, $username, $password, $database, $port, $socket, $flags);
 
 		if (!$this->connected) {
+			$this->num_errors++;
 			throw new DatabaseException('Connection error: '.$this->handle->error, $this->handle->errno);
 		}
 
@@ -122,7 +124,7 @@ class Database
 	 */
 	public function disconnect () {
 		if ($this->handle) {
-			@$this->handle->close();
+			@mysqli_close($this->handle);
 			$this->handle = null;
 			$this->connected = false;
 			$this->_multi_queries = null;
@@ -131,6 +133,7 @@ class Database
 
 	/**
 	 * Selects a database.
+	 * 
 	 * @param string $name
 	 * @return boolean Success
 	 */
@@ -138,7 +141,7 @@ class Database
 		if (!$this->connected) {
 			$this->connect();
 		}
-		$res = $this->handle->select_db($name);
+		$res = mysqli_select_db($this->handle, $name);
 		if ($res) {
 			$this->config['database'] = $name;
 		}
@@ -160,6 +163,7 @@ class Database
 		}
 
 		if (!$table || !strlen($table)) {
+			$this->num_errors++;
 			throw new DatabaseException('Must specify a table');
 		}
 
@@ -228,12 +232,15 @@ class Database
 		}
 
 		if (empty($values)) {
+			$this->num_errors++;
 			throw new DatabaseException('$table and $values cannot be empty');
 		}
 		if (!$table || !strlen($table)) {
+			$this->num_errors++;
 			throw new DatabaseException('Must specify a table');
 		}
 		if (empty($where)) {
+			$this->num_errors++;
 			throw new DatabaseException('Must specify a where clause');
 		}
 
@@ -310,14 +317,15 @@ class Database
 
 		$this->num_queries++;
 		$this->last_query =& $sql;
-		$res = $this->handle->real_query($sql);
+		$res = mysqli_real_query($this->handle, $sql);
 
 		if (!$res) {
-			$errno = $this->handle->errno;
+			$errno = mysqli_errno($this->handle);
 			if ($errno === 2006) {
 				$this->connected = false;
 			}
-			throw new DatabaseException('Query error ('.$sql.' ):   '.$this->handle->error, $errno);
+			$this->num_errors++;
+			throw new DatabaseException('Query error ('.$sql.' ):   '.mysqli_error($this->handle), $errno);
 		}
 
 		return $res;
@@ -329,7 +337,7 @@ class Database
 	 * @return mysqli::stmt The prepared statement
 	 */
 	public function prepare ($sql) {
-		$res = $this->handle->prepare($sql);
+		$res = mysqli_prepare($this->handle, $sql);
 		return $res;
 	}
 
@@ -354,34 +362,50 @@ class Database
 		
 		$sql = implode("; \n\n", $this->_multi_queries);
 		// stats
-		$this->num_queries++;
+		$this->num_queries += count($this->_multi_queries);
 		$this->last_query =& $sql;
 		// reset
 		$this->_multi_queries = null;
 		
+		return multi_query($sql);
+	}
+	
+	/**
+	 * Perform all SQL.
+	 * 
+	 * @param string $sql
+	 * @throws DatabaseException
+	 */
+	public function multi_query ($sql) {
 		// connect if need be
 		if (!$this->connected) {
 			$this->connect();
 		}
 
 		// DO IT
-		$this->handle->multi_query( $sql );
-
+		$first_result = mysqli_multi_query($this->handle, $sql);
+		
 		do {
-			$res = $this->handle->use_result();
-			if ($res === false && $this->handle->errno !== 0) {
+			$res = mysqli_use_result($this->handle);
+			$error = ($res === false && mysqli_errno($this->handle) !== 0);
+			
+			if ($res instanceof mysqli_result) {
 				@mysqli_free_result($res);
-				throw new DatabaseException('Query error ('.$sql.' ):   '.$this->handle->error, $this->handle->errno);
 			}
-			mysqli_free_result($res);
-		} while ($this->handle->next_result());
+			if ($error) {
+				$this->num_error++;
+				throw new DatabaseException('Query error ('.$sql.' ):   '.mysqli_error($this->handle), mysqli_errno($this->handle));
+			}
+		} while (mysqli_next_result($this->handle));
+		
+		return $first_result;
 	}
 
 	public function affected_rows () {
 		if (!$this->connected) {
 			return 0;
 		}
-		return $this->handle->affected_rows;
+		return mysqli_affected_rows($this->handle);
 	}
 
 	public function info () {
@@ -409,9 +433,10 @@ class Database
 		
 		if ($result instanceof mysqli_result) {
 			if ($result->num_rows > 0) {
-				$row = array_shift( $result->fetch_row() ); // return reference
+				$row = $result->fetch_row();
+				$cell = array_shift( $row ); // return reference
 				$result->free();
-				return $row;
+				return $cell;
 			} else {
 				$result->free();
 			}
@@ -448,12 +473,21 @@ class Database
 		if (!$this->connected) {
 			$this->connect();
 		}
-		return $this->handle->real_escape_string($text);
+		return mysqli_real_escape_string($this->handle, $text);
+	}
+	
+	public function __toString() {
+		return sprintf('%s( queries:%d, errors:%d, last_query:"%s" )',
+				__CLASS__,
+				$this->num_queries,
+				$this->num_errors,
+				substr($this->last_query, 0, 30)
+				);
 	}
 
-	public function each ($sql, $callable, $chunksize = 100, $max = 0) {
+	public function each ($sql, $callable, $chunksize = 100, $max = 0, $startat = 0) {
 		$sql .= ' LIMIT ';
-		$cur = 0;
+		$cur = $startat;
 
 		// chunk never bigger than max
 		if ($max > 0 && $chunksize > $max) {
@@ -463,87 +497,100 @@ class Database
 		// loop until we break
 		while(true) {
 			if ($max > 0) {
-				if ($cur >= $max) {
-					return; // done
-				} elseif (($cur+$chunksize) > $max) {
-					$chunksize = $max - $cur;
+				if ($cur >= ($max+$startat)) { //relative to starting point
+					return $cur; // done
+				} elseif (($cur+$chunksize) > ($max+$startat)) { // relative to starting point
+					$chunksize = $max+$startat - $cur;
 				}
 			}
 
 			// run query
-			$res = $this->query($sql . "$cur,$chunksize");
+			$res = $this->query($sql ." ". $cur .",". ($cur+$chunksize));
 			
+			// error, return progress
 			if (!$res) {
-				break;
+				throw new DatabaseException('Each error ('.$sql.' ):   '.$this->handle->error, $this->handle->errno);
 			}
 			
 			// buffer results
 			$res = $this->handle->store_result();
 			
+			// error, return progress
 			if (!$res) {
-				break;
+				throw new DatabaseException('Each error ('.$sql.' ):   '.$this->handle->error, $this->handle->errno);
 			}
 			
 			// main loop
-			while($d = $res->fetch_assoc()) {
-				$callable($d);
+			while($d = mysqli_fetch_assoc($res)) {
+				if (is_array($callable)) {
+					call_user_func($callable, $d);
+				} else {
+					$callable($d);
+				}
 			}
 			
+			$num_rows = $res->num_rows;
+			
 			// free the resource
-			$res->free();
+			mysqli_free_result($res);
 
-			if (count($data) == $chunksize) {
+			if ($num_rows == $chunksize) {
 				$cur += $chunksize;
 			} else {
-				return;
+				// return that last instance
+				return null;//$cur += $res->num_rows;
 			}
 		}//while
 	}
 
 }//class
 
-class DatabaseException extends Exception {
-	public function __construct($message = null, $code = null, $previous = null) {
-		parent::__construct($message, $code, $previous);
-	}
-}
-
 /**
- * This is strictly a convenience class that forwards to the default <code>Database</code> instance.
+ * Custom subclass to throw from Database.
  * @author jdecker
  */
-class DB {
+class DatabaseException extends Exception {
+	// no explicit constructors, so it inherits from parent
+}
 
-	public static function q ($sql) {
-		return Database::instance()->fetch_assoc($sql);
-	}
-
-	public static function query($sql) {
-		return Database::instance()->query($sql);
-	}
-
-	public static function insert ($table, array $values, $extra='') {
-		return Database::instance()->insert($table, $values, $extra);
-	}
-
-	public static function update($table, array $values, $where) {
-		return Database::instance()->update($table, $values, $where);
-	}
-
-	public static function & fetch_assoc ($sql) {
-		return Database::instance()->fetch_assoc($sql);
-	}
-
-	public static function & fetch_one ($sql) {
-		return Database::instance()->fetch_one($sql);
-	}
-
-	public static function & fetch_one_cell ($sql) {
-		return Database::instance()->fetch_one_cell($sql);
-	}
-
-	public static function escape ($text) {
-		return Database::instance()->escape($text);
-	}
-
+if (!class_exists('DB', false)) {
+	/**
+	 * This is strictly a convenience class that forwards to the default <code>Database</code> instance.
+	 * @author jdecker
+	 */
+	class DB {
+	
+		public static function q ($sql) {
+			return Database::instance()->fetch_assoc($sql);
+		}
+	
+		public static function query($sql) {
+			return Database::instance()->query($sql);
+		}
+	
+		public static function insert ($table, array $values, $extra='') {
+			return Database::instance()->insert($table, $values, $extra);
+		}
+	
+		public static function update($table, array $values, $where) {
+			return Database::instance()->update($table, $values, $where);
+		}
+	
+		public static function & fetch_assoc ($sql) {
+			return Database::instance()->fetch_assoc($sql);
+		}
+	
+		public static function & fetch_one ($sql) {
+			return Database::instance()->fetch_one($sql);
+		}
+	
+		public static function & fetch_one_cell ($sql) {
+			return Database::instance()->fetch_one_cell($sql);
+		}
+	
+		public static function escape ($text) {
+			return Database::instance()->escape($text);
+		}
+	
+	}//class
 }
