@@ -9,7 +9,7 @@
  *
  * Contributors:
  *     Jesse Decker <me@jessedecker.com>
- *  		- initial API and implementation
+ *    		- initial API and implementation
  *			- additional updates, bugfixes
  *
  *********************************************************/
@@ -205,6 +205,10 @@ class Logger extends AbstractLogger implements LoggerInterface, LogWriter
      */
     public function init(array $config)
     {
+        // reset
+        $this->handlers = array();
+
+        // rebuild handlers
         if (isset($config['level'])) {
             $this->setLevel($config['level']);
         }
@@ -212,7 +216,7 @@ class Logger extends AbstractLogger implements LoggerInterface, LogWriter
             $this->enableErrorLog = !!$config['error_log'];
         }
         if (isset($config['file']) && is_array($config['file'])) {
-            $c = $config['file'];
+            $c =& $config['file'];
             if (isset($c['dir'])) {
                 $h = new FileWriter($c['dir']);
 
@@ -230,10 +234,23 @@ class Logger extends AbstractLogger implements LoggerInterface, LogWriter
             }
         }
         if (isset($config['syslog']) && is_array($config['syslog'])) {
-            $c = $config['syslog'];
+            $c =& $config['syslog'];
             $ident = isset($c['ident']) ? $c['ident'] : false;
-            $options = isset($c['options']) ? $c['options'] : 0;
-            $facility = isset($c['facility']) ? $c['facility'] : LOG_USER;
+            $options = isset($c['options']) ? intval($c['options']) : 0;
+
+            $facility = LOG_USER;
+            if (isset($c['facility'])) {
+                // Facility config might be a string constant name
+                if (is_numeric($c['facility'])) {
+                    $facility = intval($c['facility']);
+                } else {
+                    $facility = constant($c['facility']);
+                    if (!$facility) {
+                        $facility = LOG_USER;
+                    }
+                }
+            }
+
             $h = new SyslogWriter($ident, $options, $facility);
 
             if (isset($c['level'])) {
@@ -242,6 +259,9 @@ class Logger extends AbstractLogger implements LoggerInterface, LogWriter
 
             $this->addHandler($h);
         }
+        if (isset($config['stdout']) && $config['stdout']) {
+            $this->addHandler(new StdoutWriter());
+        }
     }
 
     /**
@@ -249,11 +269,12 @@ class Logger extends AbstractLogger implements LoggerInterface, LogWriter
      */
     public function registerErrorHandler()
     {
-        set_error_handler(array($this, 'error_handler'));
+        set_error_handler(array($this, 'handleError'));
+        set_exception_handler(array($this, 'handleException'));
     }
 
     /**
-     * Handle a PHP exception as a log event. Translates user errors into appropriate
+     * Handle a PHP error as a log event. Translates user errors into appropriate
      * Logger levels.
      *
      * @param int $errno
@@ -263,7 +284,7 @@ class Logger extends AbstractLogger implements LoggerInterface, LogWriter
      * @param array $errcontext
      * @return boolean Always returns true to cause PHP to not use the built-in error handler
      */
-    public function error_handler($errno, $errstr, $errfile = '[unknown]', $errline = 0, array $errcontext = null)
+    public function handleError($errno, $errstr, $errfile = '[unknown]', $errline = 0, array $errcontext = null)
     {
         if (!(error_reporting() & $errno)) {
             // This error code is not included in error_reporting
@@ -299,6 +320,27 @@ class Logger extends AbstractLogger implements LoggerInterface, LogWriter
 
         // Don't execute PHP internal error handler
         return true;
+    }
+
+    /**
+     * Handle a PHP exception as a log event.
+     * @param \Exception $exception
+     */
+    public function handleException(\Exception $exception)
+    {
+        // documentation says the handler might get passed NULL
+        if (!$exception) {
+            return;
+        }
+
+        $format = get_class($exception) . "[{$exception->getCode()}]: {$exception->getMessage()}";
+
+        $errfile = $exception->getFile();
+        if ($errfile) {
+            $format .= " ($errfile:{$exception->getLine()})";
+        }
+
+        $this->log(self::CRIT, "Uncaught exception: $format");
     }
 
     /**
@@ -338,7 +380,7 @@ class Logger extends AbstractLogger implements LoggerInterface, LogWriter
      */
     public function logDebug($line, $args = self::NO_ARGUMENTS)
     {
-        $this->log(self::DEBUG, (array) $line);
+        $this->log(self::DEBUG, $line, (array) $args);
     }
 
     /**
@@ -456,8 +498,39 @@ class Logger extends AbstractLogger implements LoggerInterface, LogWriter
 
         // $args will never be NO_ARGUMENTS, because an array is technically an object
         if (count($args)) { //$args !== self::NO_ARGUMENTS) {
-            /* Print the passed object value */
-            $dump = '; ' . var_export($args, true);
+            // Print the passed object value
+            // var_export() does not handle recursion!
+            //$dump = '; ' . print_r($args, true);
+
+            // Limit depth
+            foreach ($args as &$arg) {
+                // explicit cast to array extracts variables, prepends with classname
+                if (is_object($arg)) {
+                    $arg = (array) $arg;
+                }
+                // only check arrays, objects might have instances elsewhere
+                if (is_array($arg)) {
+                    foreach ($arg as &$a) {
+                        if (is_object($a)) {
+                            $a = (array) $a;
+                        }
+                        if (is_array($a)) {
+                            foreach ($a as &$b) {
+                                if (is_array($b)) {
+                                    $b = 'array('.count($b).') [max depth reached]';
+                                } elseif (is_object($b)) {
+                                    $b = get_class($b).' [max depth reached]';
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            $opts = defined('JSON_UNESCAPED_SLASHES') ? JSON_UNESCAPED_SLASHES : 0; // PHP 5.4+
+            $dump = json_encode($args, $opts); // max_depth=2
+            $dump = str_replace(array('\\u0000', '\\\\'), array(':', '\\'), $dump);
+            $dump = "; $dump";
         }
 
         $this->logLine($level, "$status $line$dump");
@@ -525,25 +598,25 @@ class Logger extends AbstractLogger implements LoggerInterface, LogWriter
     {
         switch ($level) {
             case self::EMERG:
-                return "--EMERG--";
+                return "[EMERG]";
             case self::ALERT:
-                return "--ALERT--";
+                return "[ALERT]";
             case self::CRIT:
-                return "--CRIT--";
-            case self::FATAL: # FATAL is an alias of CRIT
-                return "--FATAL--";
+                return "[CRIT]";
+            //case self::FATAL: # FATAL is an alias of CRIT
+            //    return "[FATAL]";
             case self::NOTICE:
-                return "--NOTICE--";
+                return "[NOTICE]";
             case self::INFO:
-                return "--INFO--";
+                return "[INFO]";
             case self::WARN:
-                return "--WARN--";
+                return "[WARN]";
             case self::DEBUG:
-                return "--DEBUG--";
+                return "[DEBUG]";
             case self::ERR:
-                return "--ERROR--";
+                return "[ERROR]";
             default:
-                return "--LOG--";
+                return "[LOG]";
         }
     }
 } // class
@@ -600,7 +673,7 @@ class FileWriter extends AbstractLogWriter
      * Valid PHP date() format string for log timestamps
      * @var string
      */
-    private $_dateFormat = 'Y-m-d G:i:s O';
+    private $_dateFormat = '[Y-m-d G:i:s O]';
 
     /**
      * Class constructor
@@ -708,8 +781,8 @@ class FileWriter extends AbstractLogWriter
             trigger_error(self::$_messages['writefail'], E_USER_WARNING);
         }
     }
-
 }
+
 
 /**
  * Writes messages to syslog.
@@ -780,5 +853,61 @@ class SyslogWriter extends AbstractLogWriter
         }
 
         syslog($level, $message);
+    }
+}
+
+/**
+ * Writes message to stdout, or a web browser.
+ * @author Jesse Decker <jesse.decker@am.sony.com>
+ * @date Jun 17, 2013
+ * @version 0.1
+ */
+class StdoutWriter extends AbstractLogWriter
+{
+    public function __construct()
+    {
+        $this->html = php_sapi_name() !== 'cli';
+    }
+
+    public function logLine($level, $message)
+    {
+        if ($this->level < $level) {
+            return;
+        }
+
+        if ($this->html) {
+            $size = '0.9em';
+            $color = 'black';
+
+            switch ($level) {
+                case Logger::ALERT:
+                case Logger::CRIT:
+                case Logger::EMERG:
+                    $color = 'red';
+                    $size = '1.4em';
+                    break;
+                case Logger::ERR:
+                    $color = '#660000';
+                    $size = '1.2em';
+                    break;
+                case Logger::NOTICE:
+                    $color = '#CC9900';
+                    $size = '1.1em';
+                    break;
+                case Logger::WARN:
+                    $color = '#FF9900';
+                    $size = '1em';
+                    break;
+                case Logger::DEBUG:
+                case Logger::INFO:
+                    break;
+            }
+
+            echo "<code class=\"error\" style=\"font-size:$size;color:$color;width:100%;\">";
+            echo $message;
+            echo "\n</code><br/>";
+        } else {
+            echo $message . PHP_EOL;
+        }
     }
 }
