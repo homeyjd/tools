@@ -15,8 +15,8 @@
  *********************************************************/
 
 use Psr\Log\LoggerInterface;
-use Psr\Log\LogLevel;
-use Psr\Log\AbstractLogger;
+//use Psr\Log\LogLevel;
+//use Psr\Log\AbstractLogger;
 
 /**
  * Base methods for a handler that writes log entries.
@@ -49,61 +49,17 @@ interface LogWriter
 abstract class AbstractLogWriter implements LogWriter
 {
     /**
-     * Level for this instance
-     * @var int
-     */
-    protected $level = Logger::DEBUG;
-
-    /**
-     * @param int $level
-     * @see LogWriter::setLevel()
-     */
-    public function setLevel($level)
-    {
-        $this->level = intval($level);
-    }
-}
-
-/**
- * A PSR-3 compatible logging class with handlers.
- *
- * Based on KLogger by Kenny Katzgrau <katzgrau@gmail.com>.
- *
- * This class prefers the verbiage of "level" over "severity" because integers
- * are easier to check for.  The PSR-3 spec chose to use strings for severity
- * levels against the wisdom of other system designers.  This class is PSR-3
- * compatible for use with strings, but all self-defined severities are integers
- * and string values are converted into relevant integers for handling.
- *
- * This class implements LogWriter, so you can add multiple instances of Logger
- * as handlers for each other... if you ever need to. Just ensure you don't get
- * recursive logging loops!
- *
- * Usage:
- * $log = new Logger(Logger::INFO);
- * $log->logInfo('Returned a million search results');
- * $log->log(Logger::CRIT, 'Oh dear.');
- * $log->logDebug('x = 5'); //Prints nothing due to current severity threshhold
- *
- * @author  Jesse Decker <me@jessedecker.com>
- * @since   May 2013 | Last update June 2013
- * @link    http://jessedecker.com
- * @version 0.1
- */
-class Logger extends AbstractLogger implements LoggerInterface, LogWriter
-{
-    /**
      * Error severity, from low to high. From BSD syslog RFC, secion 4.1.1
      * @link http://www.faqs.org/rfcs/rfc3164.html
      * @var int
      */
     const EMERG = 0; // Emergency: system is unusable
     const ALERT = 1; // Alert: action must be taken immediately
-    const CRIT = 2; // Critical: critical conditions
-    const ERR = 3; // Error: error conditions
-    const WARN = 4; // Warning: warning conditions
+    const CRIT = 2;  // Critical: critical conditions
+    const ERR = 3;   // Error: error conditions
+    const WARN = 4;  // Warning: warning conditions
     const NOTICE = 5; // Notice: normal but significant condition
-    const INFO = 6; // Informational: informational messages
+    const INFO = 6;  // Informational: informational messages
     const DEBUG = 7; // Debug: debug messages
 
     /**
@@ -140,10 +96,96 @@ class Logger extends AbstractLogger implements LoggerInterface, LogWriter
     const NO_ARGUMENTS = null;//'Logger::NO_ARGUMENTS';
 
     /**
-     * Current minimum logging threshold
-     * @var integer
+     * Level for this instance
+     * @var int
      */
-    public $level = self::INFO;
+    protected $level = Logger::DEBUG;
+
+    /**
+     * @param int $level
+     * @see LogWriter::setLevel()
+     */
+    public function setLevel($level)
+    {
+        if (is_string($level) && !is_numeric($level)) {
+            $level = $this->_strToLevel($level);
+        }
+        $this->level = intval($level);
+    }
+
+    /**
+     * Convert PSR-3 string levels to integers.
+     * @param string $str
+     * @return int
+     */
+    protected function _strToLevel($str)
+    {
+        $str = strtolower($str);
+        $level = self::$_defaultSeverity;
+
+        switch ($str) {
+            case 'emergency':
+            case 'emerg':
+                $level = Logger::EMERG;
+                break;
+            case 'alert':
+                $level = Logger::ALERT;
+                break;
+            case 'critical':
+            case 'crit':
+                $level = Logger::CRIT;
+                break;
+            case 'error':
+            case 'err':
+                $level = Logger::ERR;
+                break;
+            case 'warning':
+            case 'warn':
+                $level = Logger::WARN;
+                break;
+            case 'notice':
+                $level = Logger::NOTICE;
+                break;
+            case 'info':
+                $level = Logger::INFO;
+                break;
+            case 'debug':
+                $level = Logger::DEBUG;
+                break;
+        }
+
+        return $level;
+    }
+}
+
+/**
+ * A PSR-3 compatible logging class with handlers.
+ *
+ * Based on KLogger by Kenny Katzgrau <katzgrau@gmail.com>.
+ *
+ * This class prefers the verbiage of "level" over "severity" because integers
+ * are easier to check for.  The PSR-3 spec chose to use strings for severity
+ * levels against the wisdom of other system designers.  This class is PSR-3
+ * compatible for use with strings, but all self-defined severities are integers
+ * and string values are converted into relevant integers for handling.
+ *
+ * This class implements LogWriter, so you can add multiple instances of Logger
+ * as handlers for each other... if you ever need to. Just ensure you don't get
+ * recursive logging loops!
+ *
+ * Usage:
+ * $log = new Logger(Logger::INFO);
+ * $log->logInfo('Returned a million search results');
+ * $log->log(Logger::CRIT, 'Oh dear.');
+ * $log->logDebug('x = 5'); //Prints nothing due to current severity threshhold
+ *
+ * @author  Jesse Decker <me@jessedecker.com>
+ * @since   May 2013 | Last update June 2013
+ * @link    http://jessedecker.com
+ * @version 0.1
+ */
+class Logger extends AbstractLogWriter implements LoggerInterface, LogWriter
+{
     /**
      * List of writers for this Logger
      * @var array
@@ -201,6 +243,8 @@ class Logger extends AbstractLogger implements LoggerInterface, LogWriter
 
     /**
      * Convenience function for configuring this instance and adding handlers.
+     *
+     * Looks for
      * @param array $config
      */
     public function init(array $config)
@@ -230,11 +274,16 @@ class Logger extends AbstractLogger implements LoggerInterface, LogWriter
 
                 $this->addHandler($h);
             } else {
-                trigger_error(__CLASS__.": tried building a FileWriter, but no dir");
+                trigger_error(__CLASS__.": tried building a FileWriter, but no dir", E_USER_WARNING);
             }
         }
-        if (isset($config['syslog']) && is_array($config['syslog'])) {
-            $c =& $config['syslog'];
+        if (isset($config['syslog']) && (is_array($config['syslog']) || $config['syslog'])) {
+            if (is_array($config['syslog'])) {
+                $c =& $config['syslog'];
+            } else {
+                $c = array();
+            }
+
             $ident = isset($c['ident']) ? $c['ident'] : false;
             $options = isset($c['options']) ? intval($c['options']) : 0;
 
@@ -259,8 +308,20 @@ class Logger extends AbstractLogger implements LoggerInterface, LogWriter
 
             $this->addHandler($h);
         }
-        if (isset($config['stdout']) && $config['stdout']) {
-            $this->addHandler(new StdoutWriter());
+        if (isset($config['stdout']) && (is_array($config['stdout']) || $config['stdout'])) {
+            if (is_array($config['stdout'])) {
+                $c =& $config['stdout'];
+            } else {
+                $c = array();
+            }
+
+            $h = new StdoutWriter();
+
+            if (isset($c['level'])) {
+                $h->setLevel($c['level']);
+            }
+
+            $this->addHandler($h);
         }
     }
 
@@ -371,6 +432,117 @@ class Logger extends AbstractLogger implements LoggerInterface, LogWriter
     {
         $this->level = $lvl;
     }
+
+    /************************ Abstract Logger *************************************/
+
+    /**
+     * System is unusable.
+     *
+     * @param string $message
+     * @param array $context
+     * @return null
+     */
+    public function emergency($message, array $context = array())
+    {
+        $this->log(self::EMERG, $message, $context);
+    }
+
+    /**
+     * Action must be taken immediately.
+     *
+     * Example: Entire website down, database unavailable, etc. This should
+     * trigger the SMS alerts and wake you up.
+     *
+     * @param string $message
+     * @param array $context
+     * @return null
+     */
+    public function alert($message, array $context = array())
+    {
+        $this->log(self::ALERT, $message, $context);
+    }
+
+    /**
+     * Critical conditions.
+     *
+     * Example: Application component unavailable, unexpected exception.
+     *
+     * @param string $message
+     * @param array $context
+     * @return null
+     */
+    public function critical($message, array $context = array())
+    {
+        $this->log(self::CRIT, $message, $context);
+    }
+
+    /**
+     * Runtime errors that do not require immediate action but should typically
+     * be logged and monitored.
+     *
+     * @param string $message
+     * @param array $context
+     * @return null
+     */
+    public function error($message, array $context = array())
+    {
+        $this->log(self::ERROR, $message, $context);
+    }
+
+    /**
+     * Exceptional occurrences that are not errors.
+     *
+     * Example: Use of deprecated APIs, poor use of an API, undesirable things
+     * that are not necessarily wrong.
+     *
+     * @param string $message
+     * @param array $context
+     * @return null
+     */
+    public function warning($message, array $context = array())
+    {
+        $this->log(self::WARNING, $message, $context);
+    }
+
+    /**
+     * Normal but significant events.
+     *
+     * @param string $message
+     * @param array $context
+     * @return null
+     */
+    public function notice($message, array $context = array())
+    {
+        $this->log(self::NOTICE, $message, $context);
+    }
+
+    /**
+     * Interesting events.
+     *
+     * Example: User logs in, SQL logs.
+     *
+     * @param string $message
+     * @param array $context
+     * @return null
+     */
+    public function info($message, array $context = array())
+    {
+        $this->log(self::INFO, $message, $context);
+    }
+
+    /**
+     * Detailed debug information.
+     *
+     * @param string $message
+     * @param array $context
+     * @return null
+     */
+    public function debug($message, array $context = array())
+    {
+        $this->log(self::DEBUG, $message, $context);
+    }
+
+    /*********************/
 
     /**
      * Writes a $line to the log with a severity level of DEBUG
@@ -555,46 +727,12 @@ class Logger extends AbstractLogger implements LoggerInterface, LogWriter
         }
     }
 
-    private function _strToLevel($str)
-    {
-        $str = strtolower($str);
-        $level = self::$_defaultSeverity;
-
-        switch ($str) {
-            case 'emergency':
-            case 'emerg':
-                $level = Logger::EMERG;
-                break;
-            case 'alert':
-                $level = Logger::ALERT;
-                break;
-            case 'critical':
-            case 'crit':
-                $level = Logger::CRIT;
-                break;
-            case 'error':
-            case 'err':
-                $level = Logger::ERR;
-                break;
-            case 'warning':
-            case 'warn':
-                $level = Logger::WARN;
-                break;
-            case 'notice':
-                $level = Logger::NOTICE;
-                break;
-            case 'info':
-                $level = Logger::INFO;
-                break;
-            case 'debug':
-                $level = Logger::DEBUG;
-                break;
-        }
-
-        return $level;
-    }
-
-    private function _levelToString($level)
+    /**
+     * Generate a string for an integer level.
+     * @param int $level
+     * @return string
+     */
+    protected function _levelToString($level)
     {
         switch ($level) {
             case self::EMERG:
@@ -630,7 +768,6 @@ class Logger extends AbstractLogger implements LoggerInterface, LogWriter
  */
 class FileWriter extends AbstractLogWriter
 {
-
     /**
      * Internal status codes
      */
@@ -673,7 +810,7 @@ class FileWriter extends AbstractLogWriter
      * Valid PHP date() format string for log timestamps
      * @var string
      */
-    private $_dateFormat = '[Y-m-d G:i:s O]';
+    private $_dateFormat = '[Y-m-d H:i:s]';
 
     /**
      * Class constructor
@@ -812,6 +949,7 @@ class SyslogWriter extends AbstractLogWriter
      */
     public function __destruct()
     {
+        // not necessary
         //closelog();
     }
 
@@ -864,11 +1002,27 @@ class SyslogWriter extends AbstractLogWriter
  */
 class StdoutWriter extends AbstractLogWriter
 {
-    public function __construct()
+    /**
+     * Whether to output HTML text.
+     * @var boolean
+     */
+    public $html = false;
+
+    /**
+     * Sets $html to false if PHP is running from CLI.
+     * @param string $html
+     */
+    public function __construct($html = null)
     {
-        $this->html = php_sapi_name() !== 'cli';
+        if ($html === null) {
+            $this->html = php_sapi_name() !== 'cli';
+        }
     }
 
+    /**
+     * Write the message to stdout, or format as HTML output if browser.
+     * @see LogWriter::logLine()
+     */
     public function logLine($level, $message)
     {
         if ($this->level < $level) {
@@ -905,9 +1059,13 @@ class StdoutWriter extends AbstractLogWriter
 
             echo "<code class=\"error\" style=\"font-size:$size;color:$color;width:100%;\">";
             echo $message;
-            echo "\n</code><br/>";
+            echo "</code><br/>\n";
+
         } else {
-            echo $message . PHP_EOL;
+            // arguably, two echo statements are faster because you don't have to
+            // do string concatenation in memory before outputting
+            echo $message;
+            echo PHP_EOL;
         }
     }
 }
