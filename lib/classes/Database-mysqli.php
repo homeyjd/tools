@@ -9,13 +9,18 @@
  *
  * Contributors:
  *     Jesse Decker <me@jessedecker.com>
- *			- initial API and implementation
+ *    		- initial API and implementation
  *			- additional updates, bugfixes
  *
  *********************************************************/
 
 /**
  * Custom class to manage database connections.
+ *
+ * A connection is not opened until the first query, or on an explicit call to
+ * connect(). Once a connection is open, you must explicitly close it if you
+ * wish to re-use the class instance with a different connection. On garbage
+ * collection, this class will auto-close its connection.
  *
  * @author Jesse Decker, me@jessedecker.com
  * @version 0.5 - Jan1,2013
@@ -49,6 +54,8 @@ class Database
      *		username: for database
      *		password: for database
      *		database: default name
+     *      log_threshold: int value above will throw notice to log function (trigger_error by default)
+     *      log_func: callable value (array|string) to log queries
      *
      * @var array
      */
@@ -70,21 +77,18 @@ class Database
      * @param array $config Array of configuration parameters. See <code>$this->config</code> for documentation.
      * @return instance
      */
-    public function __construct($init = 'default', array $config = array())
+    public function __construct($init = null, array $config = array())
     {
         if (is_array($init)) {
             $config = $init;
-            $init = 'default';
+            $init = null;
         }
-        if (empty(self::$_instances[$init])) {
+        if (!empty($init) && empty(self::$_instances[$init])) {
             self::$_instances[$init] = $this;
         }
         if (!empty($config)) {
-            $this->config = $config;
+            $this->config($config);
         }
-        // 		if (!empty($config['close_on_shutdown'])) {
-        // 			register_shutdown_function(array($this,'disconnect'));
-        // 		}
     }
 
     /**
@@ -96,9 +100,31 @@ class Database
     }
 
     /**
+     * Forward any non-declared method calls to the handle directly.
+     */
+    public function __call($name, array $arguments)
+    {
+        if (!$this->connected) {
+            $this->connect();
+        }
+        return call_user_func_array(array($this->handle, $name), $arguments);
+    }
+
+    /**
+     * Forward any non-declared instance variables to the handle directly.
+     */
+    public function __get($name)
+    {
+        if (!$this->connected) {
+            $this->connect();
+        }
+        return $this->handle->$name;
+    }
+
+    /**
      * Modify and/or retrieves the configuration.
      * @param $vars Array or object of variables to merge into $config
-     * @return The current $config array after modifications, if any
+     * @return The current $config array after any modifications
      */
     public function config($vars = array())
     {
@@ -108,6 +134,10 @@ class Database
         if (is_object($vars)) {
             $vars = (array) $vars;
         }
+        if (isset($vars['log_threshold'])) {
+            $vars['log_threshold'] = floatval($vars['log_threshold']);
+        }
+
         return $this->config = array_merge($this->config, $vars);
     }
 
@@ -125,18 +155,26 @@ class Database
             return;
         }
 
-        extract(array_merge(array('database' => null, 'port' => null, 'socket' => null, 'flags' => null), $this->config));
+        extract($this->config + array('database' => null, 'port' => null, 'socket' => null, 'flags' => null));
+
+        // ensure port is int
+        $port = intval($port);
+        if (!$port) {
+            $port = null;
+        }
+
         $this->handle = mysqli_init();
 
         if (defined('MYSQLI_OPT_INT_AND_FLOAT_NATIVE')) {
             $this->handle->options(MYSQLI_OPT_INT_AND_FLOAT_NATIVE, 1);
         }
 
-        $this->connected = @$this->handle->real_connect($server, $username, $password, $database, $port, $socket, $flags);
+        // ensure $server/$username/$password are strings
+        $this->connected = $this->handle->real_connect('' . $server, '' . $username, '' . $password, $database, $port, $socket, $flags);
 
         if (!$this->connected) {
             $this->num_errors++;
-            throw new DatabaseException('Connection error: ' . $this->handle->error, $this->handle->errno);
+            throw new DatabaseException("Connection error [{$this->handle->errno}] {$this->handle->error}");
         }
 
         return $this->connected;
@@ -148,7 +186,7 @@ class Database
     public function disconnect()
     {
         if ($this->handle) {
-            @mysqli_close($this->handle);
+            mysqli_close($this->handle);
             $this->handle = null;
             $this->connected = false;
             $this->_multi_queries = null;
@@ -200,7 +238,9 @@ class Database
         // check if key-array
         if (empty($values[0]) || !is_array($values[0])) {
             $cols = array_keys($values);
-            $values = array($values);
+            $values = array(
+                $values
+            );
         } else {
             $cols = array();
             foreach ($values as $v) {
@@ -216,14 +256,17 @@ class Database
             $v = (array) $v;
             $cur_vals = array();
 
-            foreach ($cols as $c) {
+            foreach ($cols as &$c) {
                 if (isset($v[$c])) {
-                    if (is_int($v[$c]) || is_float($v[$c])) {
-                        $cur_vals[] = "{$v[$c]}";
-                    } elseif (is_bool($v[$c])) {
-                        $cur_vals[] = $v[$c] ? 'TRUE' : 'FALSE';
-                    } else {//if (is_string($v[$c])) {
-                        $cur_vals[] = "'" . $this->handle->real_escape_string($v[$c]) . "'";
+                    $value = &$v[$c];
+                    if (is_int($value) || is_float($value)) {
+                        $cur_vals[] = "{$value}";
+                    } elseif (is_bool($value)) {
+                        $cur_vals[] = $value ? 'TRUE' : 'FALSE';
+                    } elseif (preg_match('#^(NOW)\(\)$#i', $value)) {
+                        $cur_vals[] = $value;
+                    } else {//if (is_string($value)) {
+                        $cur_vals[] = "'" . $this->handle->real_escape_string($value) . "'";
                     }
                 } else {
                     $cur_vals[] = 'NULL';
@@ -233,7 +276,35 @@ class Database
             $vals[] = '(' . implode(',', $cur_vals) . ')';
         }
 
-        $sql .= implode(',', $vals) . ' ' . $extra;
+        $sql .= implode(',', $vals);
+
+        if (is_string($extra) && strlen($extra) > 1) {
+            $sql .= ' ' . $extra;
+        } else if (is_array($extra) && count($extra)) {
+            $cur_vals = array();
+
+            foreach ($extra as $key => $value) {
+                if (strpos($key, '`') !== false) {
+                    $cur_val = "$key = ";
+                } else {
+                    $cur_val = "`$key` = ";
+                }
+
+                if (is_int($value) || is_float($value)) {
+                    $cur_val .= "{$value}";
+                } elseif (is_bool($value)) {
+                    $cur_val .= $value ? 'TRUE' : 'FALSE';
+                } elseif (preg_match('#^(LAST_INSERT_ID|VALUES)\([ a-zA-Z0-9_`\.]+\)$#i', trim($value))) {
+                    $cur_val .= $value;
+                } else {//if (is_string($value)) {
+                    $cur_val .= "'" . $this->handle->real_escape_string($value) . "'";
+                }
+                $cur_vals[] = $cur_val;
+            }
+
+            $sql .= ' ON DUPLICATE KEY UPDATE ';
+            $sql .= implode(', ', $cur_vals);
+        }
 
         if (!$this->query($sql)) {
             return false;
@@ -251,7 +322,7 @@ class Database
      * @throws DatabaseException if any parameter is empty, or the query fails
      * @return NULL|boolean|int NULL if there is a problem with generating the query, false on query failure, or mysqli::$affected_rows on success
      */
-    public function update($table, array $values, $where)
+    public function update($table, array $values, $where = '')
     {
         if (!$this->connected) {
             $this->connect();
@@ -279,14 +350,22 @@ class Database
                 $cur_val .= "{$v}";
             } elseif (is_bool($v)) {
                 $cur_val .= $v ? 'TRUE' : 'FALSE';
-            } else {//if (is_string($v[$c])) {
+            } elseif (preg_match('#^(NOW)\(\)$#i', $v)) {
+                $cur_vals[] = $v;
+            } else {//if (is_string($v)) {
                 $cur_val .= "'" . $this->handle->real_escape_string($v) . "'";
             }
 
             $vals[] = $cur_val;
         }
 
-        $sql .= implode(',', $vals) . ' WHERE ' . $where;
+        $sql .= implode(',', $vals);
+
+        if (stripos($where, 'WHERE') === false) {
+            $sql .= ' WHERE ';
+        }
+
+        $sql .= $where;
 
         if (!$this->query($sql)) {
             return false;
@@ -305,10 +384,12 @@ class Database
         $this->query($sql);
         $result = $this->handle->store_result();
         $values = array();
-        while ($vals = $result->fetch_assoc()) {
-            $values[] = $vals;
+        if ($result) {
+            while ($vals = $result->fetch_assoc()) {
+                $values[] = $vals;
+            }
+            $result->free();
         }
-        $result->free();
         return $values;
     }
 
@@ -327,13 +408,26 @@ class Database
     }
 
     /**
+     * Get the last error number and message as a concat'd string. Null if no last error.
+     * @return string|NULL
+     */
+    public function error()
+    {
+        $errno = mysqli_errno($this->handle);
+        if ($errno) {
+            return "$errno : " . mysqli_error($this->handle);
+        }
+        return null;
+    }
+
+    /**
      * Runs a query against a database. Will automatically open a connection if there is none.
      * In the event of a multi-query, this will simply queue up the SQL. You must call multi_query_commit() to send.
      * @param string $sql The query
      * @throws DatabaseException On any database error
      * @return boolean Query success
      */
-    public function query($sql)
+    public function query($sql, $useMulti = false)
     {
         if ($this->_multi_queries !== null) {
             $this->_multi_queries[] = $sql;
@@ -346,15 +440,50 @@ class Database
 
         $this->num_queries++;
         $this->last_query = &$sql;
-        $res = mysqli_real_query($this->handle, $sql);
+
+        // We need stats if threshold is set OR if stats is explicitly set
+        $logThreshold = isset($this->config['log_threshold']) ? floatval($this->config['log_threshold']) : -1;
+        $doStats = $logThreshold !== -1;
+        $startTime = ($doStats) ? microtime(true) : 0;
+
+        // Perform actual query
+        if ($useMulti) {
+            $res = mysqli_multi_query($this->handle, $sql);
+        } else {
+            $res = mysqli_real_query($this->handle, $sql);
+        }
+
+        $endTime = ($doStats) ? microtime(true) : 0;
+        $func = isset($this->config['log_func']) ? $this->config['log_func'] : false;
+        $time = $endTime - $startTime;
+
+        // check if we must log this
+        if ($doStats && $time >= $logThreshold) {
+            // we are logging this transaction
+
+            $stats = ($doStats) ? sprintf(' (%.4fs)', $time) : null;
+            $success = ($this->handle->errno) ? " -- [{$this->handle->errno}] {$this->handle->error}" : null;
+            $line = "Query{$stats}: {$sql}{$success}";
+
+            if (is_callable($func)) {
+                if (is_array($func)) {
+                    call_user_func($func, $line);
+                } else {
+                    $func($line);
+                }
+            } else {
+                trigger_error($line, E_USER_NOTICE);
+            }
+        }
 
         if (!$res) {
             $errno = mysqli_errno($this->handle);
+            // "Server went away", meant must reconnect!
             if ($errno === 2006) {
                 $this->connected = false;
             }
             $this->num_errors++;
-            throw new DatabaseException('Query error (' . $sql . ' ):   ' . mysqli_error($this->handle), $errno);
+            throw new DatabaseException("Query Error [{$errno}] {$this->handle->error} ( {$sql} )", $errno);
         }
 
         return $res;
@@ -399,7 +528,18 @@ class Database
         // reset
         $this->_multi_queries = null;
 
-        return multi_query($sql);
+        return $this->multi_query($sql);
+    }
+
+    /**
+     * Turns multi-query mode off and returns the queries that HAD been queued.
+     * @return array
+     */
+    public function multi_query_abort()
+    {
+        $queries = $this->_multi_queries;
+        $this->_multi_queries = null;
+        return $queries;
     }
 
     /**
@@ -416,20 +556,22 @@ class Database
         }
 
         // DO IT
-        $first_result = mysqli_multi_query($this->handle, $sql);
+        // query() handles first response
+        $first_result = $this->query($sql, true);
 
-        do {
+        while(mysqli_more_results($this->handle) && mysqli_next_result($this->handle)) {
+
             $res = mysqli_use_result($this->handle);
             $error = ($res === false && mysqli_errno($this->handle) !== 0);
 
             if ($res instanceof mysqli_result) {
-                @mysqli_free_result($res);
+                mysqli_free_result($res);
             }
             if ($error) {
                 $this->num_error++;
-                throw new DatabaseException('Query error (' . $sql . ' ):   ' . mysqli_error($this->handle), mysqli_errno($this->handle));
+                throw new DatabaseException("Query error [{$this->handle->errno}] {$this->handle->error} '$sql'", $this->handle->errno);
             }
-        } while (mysqli_next_result($this->handle));
+        }
 
         return $first_result;
     }
@@ -467,18 +609,18 @@ class Database
 
         $this->query($sql);
         $result = $this->handle->store_result();
+        $cell = null;
 
         if ($result instanceof mysqli_result) {
             if ($result->num_rows > 0) {
                 $row = $result->fetch_row();
                 $cell = array_shift($row); // return reference
                 $result->free();
-                return $cell;
             } else {
                 $result->free();
             }
         }
-        return null;
+        return $cell;
     }
 
     public function &fetch_one($sql)
@@ -499,7 +641,9 @@ class Database
                 $result->free();
             }
         }
-        return null;
+
+        $result = null;
+        return $result;
     }
 
     /**
@@ -515,11 +659,28 @@ class Database
         return mysqli_real_escape_string($this->handle, $text);
     }
 
+    /**
+     * Prints the last query and some statistics for this instance.
+     * @return string
+     */
     public function __toString()
     {
         return sprintf('%s( queries:%d, errors:%d, last_query:"%s" )', __CLASS__, $this->num_queries, $this->num_errors, substr($this->last_query, 0, 30));
     }
 
+    /**
+     * Run the $callable for every row, but only do so with so many records at a time.
+     *
+     * Allows memory to grow incrementally instead of all at once.
+     *
+     * @param string $sql
+     * @param string|array $callable
+     * @param int $chunksize
+     * @param int $max
+     * @param int $startat
+     * @throws DatabaseException
+     * @return number|NULL
+     */
     public function each($sql, $callable, $chunksize = 100, $max = 0, $startat = 0)
     {
         $sql .= ' LIMIT ';
@@ -545,7 +706,7 @@ class Database
 
             // error, return progress
             if (!$res) {
-                throw new DatabaseException('Each error (' . $sql . ' ):   ' . $this->handle->error, $this->handle->errno);
+                throw new DatabaseException("Each error [{$this->handle->errno}] {$this->handle->error} '$sql'", $this->handle->errno);
             }
 
             // buffer results
@@ -553,7 +714,7 @@ class Database
 
             // error, return progress
             if (!$res) {
-                throw new DatabaseException('Each error (' . $sql . ' ):   ' . $this->handle->error, $this->handle->errno);
+                throw new DatabaseException("Each error [{$this->handle->errno}] {$this->handle->error} '$sql'", $this->handle->errno);
             }
 
             // main loop
@@ -585,7 +746,7 @@ class Database
  * Custom subclass to throw from Database.
  * @author jdecker
  */
-class DatabaseException extends Exception
+class DatabaseException extends \Exception
 {
     // no explicit constructors, so it inherits from parent
 }
